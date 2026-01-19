@@ -538,7 +538,7 @@ function extractDeviceExportVisits(json) {
             <td>${fmtDuration(r.seconds || 0)}</td>
           </tr>`;
         }).join("")
-      : rows.slice(0, 300).map((r,i) => `<tr>
+      : (kind === "places" ? rows : rows.slice(0, 300)).map((r,i) => `<tr>
           <td>${i+1}</td>
           <td>${escapeHtml(r.name || r.key || "—")}</td>
           <td>${r.visits ?? "—"}</td>
@@ -555,7 +555,7 @@ function extractDeviceExportVisits(json) {
   function renderMarkers(topPlaces) {
     markersLayer.clearLayers();
     const bounds = [];
-    for (const p of topPlaces.slice(0, 200)) {
+    for (const p of topPlaces.slice(0, 500)) {
       const m = L.marker([p.lat, p.lng]);
       const label = `<b>${escapeHtml(p.name || p.key)}</b><br/>Visits: ${p.visits}<br/>Time: ${fmtDuration(p.seconds)}<br/>${p.city ? escapeHtml(p.city) : ""}${p.country ? ", " + escapeHtml(p.country) : ""}`;
       m.bindPopup(label);
