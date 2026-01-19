@@ -1,0 +1,644 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Google Timeline Viewer (Local)</title>
+
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+  />
+  <style>
+    :root { --bg:#0b0e14; --card:#121726; --muted:#93a4c7; --text:#e8eeff; --line:#24304d; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; background:var(--bg); color:var(--text); }
+    header { padding:14px 18px; border-bottom:1px solid var(--line); display:flex; gap:12px; align-items:center; justify-content:space-between; }
+    header h1 { margin:0; font-size:16px; letter-spacing:.2px; }
+    .controls { display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
+    .controls > * { background:var(--card); border:1px solid var(--line); color:var(--text); border-radius:10px; padding:8px 10px; }
+    .controls label { display:flex; gap:8px; align-items:center; cursor:pointer; }
+    .controls input[type="file"] { padding:6px 10px; }
+    .controls input[type="checkbox"] { transform: scale(1.1); }
+    main { display:grid; grid-template-columns: 1.6fr 1fr; gap:12px; padding:12px; height: calc(100vh - 64px); box-sizing:border-box; }
+    #map { border-radius:14px; border:1px solid var(--line); overflow:hidden; }
+    .panel { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:12px; overflow:auto; }
+    .summary { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:10px; }
+    .pill { border:1px solid var(--line); border-radius:999px; padding:6px 10px; color:var(--muted); font-size:12px; }
+    .tabs { display:flex; gap:8px; margin:8px 0 12px; flex-wrap:wrap; }
+    .tab { border:1px solid var(--line); border-radius:999px; padding:7px 10px; font-size:12px; color:var(--muted); cursor:pointer; user-select:none; }
+    .tab.active { background:#1a2340; color:var(--text); border-color:#34508f; }
+    table { width:100%; border-collapse: collapse; font-size:12px; }
+    th, td { text-align:left; padding:8px 6px; border-bottom:1px solid var(--line); vertical-align:top; }
+    th { color:var(--muted); font-weight:600; position:sticky; top:0; background:var(--card); }
+    tr:hover td { background:#0f1424; }
+    .muted { color:var(--muted); }
+    .row2 { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    .btn { cursor:pointer; }
+    .btn:hover { border-color:#3c5aa3; }
+    .warn { color:#ffd48a; }
+    .ok { color:#b7ffcf; }
+    .small { font-size:11px; color:var(--muted); line-height:1.35; }
+    footer { padding:10px 12px; border-top:1px solid var(--line); color:var(--muted); font-size:11px; }
+    a { color:#9bbcff; text-decoration:none; }
+    a:hover { text-decoration:underline; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>Google Timeline Viewer (Local)</h1>
+  <div class="controls">
+    <input id="fileInput" type="file" accept=".json" multiple />
+    <label class="btn">
+      <input id="enableGeocode" type="checkbox" />
+      Enrich city/country (slow; uses OpenStreetMap)
+    </label>
+    <button id="resetBtn" class="btn" type="button">Reset</button>
+  </div>
+</header>
+
+<main>
+  <div id="map"></div>
+
+  <div class="panel">
+    <div class="summary" id="summary"></div>
+
+    <div class="row2">
+      <div class="small">
+        Supports: <span class="ok">Semantic Location History</span> (<code>timelineObjects[]</code>) and <span class="ok">Records.json</span> (<code>locations[]</code>).<br/>
+        Tip: For best “places/cities/countries”, use Semantic monthly files.
+      </div>
+    </div>
+
+    <div class="tabs">
+      <div class="tab active" data-tab="countries">Countries</div>
+      <div class="tab" data-tab="cities">Cities</div>
+      <div class="tab" data-tab="places">Places</div>
+      <div class="tab" data-tab="visits">Visits</div>
+    </div>
+
+    <div id="tableWrap"></div>
+
+    <footer>
+      Map tiles © OpenStreetMap contributors. If you enable enrichment, reverse geocoding uses Nominatim (rate-limited).
+    </footer>
+  </div>
+</main>
+
+<script
+  src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+  integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+  crossorigin=""
+></script>
+
+<script>
+  // ---------- Map ----------
+  const map = L.map("map", { worldCopyJump: true }).setView([20, 0], 2);
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    attribution: '&copy; OpenStreetMap contributors'
+  }).addTo(map);
+
+  const markersLayer = L.layerGroup().addTo(map);
+
+  // ---------- Helpers ----------
+  const e7ToDeg = (v) => (typeof v === "number" ? v / 1e7 : null);
+  const round = (v, d=4) => Math.round(v * (10**d)) / (10**d);
+  const coordKey = (lat, lng) => `${round(lat,4)},${round(lng,4)}`;
+
+  const parseIso = (s) => {
+    const t = Date.parse(s);
+    return Number.isFinite(t) ? t : null;
+  };
+
+  const fmtDuration = (seconds) => {
+    if (!Number.isFinite(seconds) || seconds <= 0) return "—";
+    const mins = Math.round(seconds/60);
+    if (mins < 60) return `${mins} min`;
+    const hrs = Math.round(mins/60);
+    if (hrs < 48) return `${hrs} hr`;
+    const days = Math.round(hrs/24);
+    return `${days} d`;
+  };
+
+  const haversineKm = (a, b) => {
+    // a,b: {lat,lng}
+    const R = 6371;
+    const toRad = (x) => x * Math.PI / 180;
+    const dLat = toRad(b.lat - a.lat);
+    const dLng = toRad(b.lng - a.lng);
+    const lat1 = toRad(a.lat), lat2 = toRad(b.lat);
+    const s = Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLng/2)**2;
+    return 2 * R * Math.asin(Math.min(1, Math.sqrt(s)));
+  };
+
+  const bestCity = (addr) =>
+    addr.city || addr.town || addr.village || addr.hamlet || addr.city_district || addr.suburb || null;
+
+  // ---------- State ----------
+  let currentTab = "countries";
+  let visits = [];      // normalized list
+  let agg = null;       // aggregations
+  let geoCache = new Map(); // in-memory per session
+
+  // Load any cached geocodes from localStorage (per rounded coord)
+  try {
+    const raw = localStorage.getItem("timelineViewer_geoCache_v1");
+    if (raw) {
+      const obj = JSON.parse(raw);
+      for (const [k,v] of Object.entries(obj)) geoCache.set(k, v);
+    }
+  } catch {}
+
+  const persistGeoCache = () => {
+    try {
+      const obj = {};
+      for (const [k,v] of geoCache.entries()) obj[k] = v;
+      localStorage.setItem("timelineViewer_geoCache_v1", JSON.stringify(obj));
+    } catch {}
+  };
+
+  // ---------- UI ----------
+  const $summary = document.getElementById("summary");
+  const $tableWrap = document.getElementById("tableWrap");
+  const $fileInput = document.getElementById("fileInput");
+  const $enableGeocode = document.getElementById("enableGeocode");
+  const $resetBtn = document.getElementById("resetBtn");
+
+  document.querySelectorAll(".tab").forEach(t => {
+    t.addEventListener("click", () => {
+      document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
+      t.classList.add("active");
+      currentTab = t.dataset.tab;
+      render();
+    });
+  });
+
+  $resetBtn.addEventListener("click", resetAll);
+
+  function resetAll() {
+    visits = [];
+    agg = null;
+    markersLayer.clearLayers();
+    $summary.innerHTML = "";
+    $tableWrap.innerHTML = `<div class="muted">Load your JSON file(s) to start.</div>`;
+    map.setView([20,0],2);
+    $fileInput.value = "";
+  }
+
+  resetAll();
+
+  // ---------- Detect + Parse ----------
+  function detectType(json) {
+  if (Array.isArray(json)) return "device_export_array";            // <-- your file
+  if (json && Array.isArray(json.semanticSegments)) return "device_export_object";
+  if (json && Array.isArray(json.timelineObjects)) return "semantic_takeout";
+  if (json && Array.isArray(json.locations)) return "records_takeout";
+  return "unknown";
+}
+
+function parseGeoString(input) {
+  // Accepts:
+  // - "geo:40.740850,-73.878084"
+  // - "40.740850,-73.878084"
+  // - "45.5230992°, -73.6889564°"
+  // - { latLng: "26.2546°, -81.7999°" }  (some exports)
+  if (!input) return null;
+
+  let s = input;
+
+  if (typeof input === "object" && input.latLng) s = input.latLng;
+  if (typeof s !== "string") return null;
+
+  s = s.trim()
+    .replace(/^geo:/i, "")
+    .replaceAll("°", "");
+
+  const parts = s.split(",").map(x => parseFloat(x.trim()));
+  if (parts.length < 2 || !Number.isFinite(parts[0]) || !Number.isFinite(parts[1])) return null;
+
+  return { lat: parts[0], lng: parts[1] };
+}
+
+function extractDeviceExportVisits(json) {
+  // Handles:
+  //  - raw array: [ {startTime,endTime,visit/activity/...}, ... ]
+  //  - wrapped: { semanticSegments: [ ... ] }
+  const segs = Array.isArray(json) ? json : (json.semanticSegments || []);
+  const out = [];
+
+  for (const seg of segs) {
+    const start = seg.startTime || null;
+    const end = seg.endTime || null;
+
+    // VISITS (best for "places you've been")
+    const tc = seg.visit?.topCandidate;
+    if (tc) {
+      const placeId = tc.placeId || tc.placeID || tc.placeID || null;
+      const semanticType = tc.semanticType || "Unknown";
+
+      // placeLocation can be a string "geo:lat,lng" OR an object with latLng
+      const loc = parseGeoString(tc.placeLocation);
+      if (loc) {
+        const startMs = start ? Date.parse(start) : null;
+        const endMs = end ? Date.parse(end) : null;
+        const seconds = (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs)
+          ? (endMs - startMs) / 1000
+          : 0;
+
+        out.push({
+          kind: "placeVisit",
+          lat: loc.lat,
+          lng: loc.lng,
+          placeId,
+          name: semanticType,  // Often HOME/WORK/Unknown; you can replace w/ geocode later
+          address: null,
+          start,
+          end,
+          seconds
+        });
+        continue;
+      }
+    }
+
+    // Optional: ACTIVITY endpoints (if you want to also count "passed through" areas)
+    // For now we ignore to keep the "visited places" list clean.
+    // You can uncomment later if you want.
+    /*
+    if (seg.activity?.start || seg.activity?.end) {
+      const aStart = parseGeoString(seg.activity.start);
+      const aEnd = parseGeoString(seg.activity.end);
+      // could store paths separately or add as points
+    }
+    */
+  }
+
+  return out;
+}
+
+  function extractSemantic(allJson) {
+    const out = [];
+    for (const json of allJson) {
+      for (const obj of (json.timelineObjects || [])) {
+        const pv = obj.placeVisit;
+        if (!pv) continue;
+
+        const dur = pv.duration || {};
+        const loc = pv.location || {};
+        const latE7 = (typeof loc.latitudeE7 === "number") ? loc.latitudeE7 : pv.centerLatE7;
+        const lngE7 = (typeof loc.longitudeE7 === "number") ? loc.longitudeE7 : pv.centerLngE7;
+        const lat = e7ToDeg(latE7);
+        const lng = e7ToDeg(lngE7);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+
+        const startMs = parseIso(dur.startTimestamp);
+        const endMs = parseIso(dur.endTimestamp);
+        const seconds = (startMs && endMs && endMs > startMs) ? (endMs - startMs)/1000 : 0;
+
+        out.push({
+          kind: "placeVisit",
+          lat, lng,
+          placeId: loc.placeId || null,
+          name: loc.name || null,
+          address: loc.address || null,
+          start: dur.startTimestamp || null,
+          end: dur.endTimestamp || null,
+          seconds,
+        });
+      }
+    }
+    return out;
+  }
+
+  function extractRecordsAsStays(allJson) {
+    // Records.json is raw points; we approximate "stays" by grouping consecutive points:
+    // - within 200m
+    // - gap <= 30min
+    // - keep only groups lasting >= 10min
+    const points = [];
+    for (const json of allJson) {
+      for (const rec of (json.locations || [])) {
+        const lat = e7ToDeg(rec.latitudeE7);
+        const lng = e7ToDeg(rec.longitudeE7);
+        const ts = rec.timestamp || (rec.timestampMs ? new Date(Number(rec.timestampMs)).toISOString() : null);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng) || !ts) continue;
+        points.push({ lat, lng, ts, placeId: rec.placeId || null });
+      }
+    }
+    points.sort((a,b) => a.ts.localeCompare(b.ts));
+
+    const stays = [];
+    let cur = null;
+
+    const finalize = () => {
+      if (!cur) return;
+      const startMs = Date.parse(cur.start);
+      const endMs = Date.parse(cur.end);
+      const seconds = (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs) ? (endMs - startMs)/1000 : 0;
+      if (seconds >= 10*60) {
+        stays.push({
+          kind: "stay",
+          lat: cur.sumLat / cur.n,
+          lng: cur.sumLng / cur.n,
+          placeId: cur.placeId || null,
+          name: null,
+          address: null,
+          start: cur.start,
+          end: cur.end,
+          seconds
+        });
+      }
+    };
+
+    for (const p of points) {
+      if (!cur) {
+        cur = { start: p.ts, end: p.ts, n: 1, sumLat: p.lat, sumLng: p.lng, placeId: p.placeId };
+        continue;
+      }
+      const center = { lat: cur.sumLat/cur.n, lng: cur.sumLng/cur.n };
+      const distKm = haversineKm(center, p);
+      const gapMs = Date.parse(p.ts) - Date.parse(cur.end);
+
+      if (distKm <= 0.2 && gapMs <= 30*60*1000) {
+        cur.end = p.ts;
+        cur.n += 1;
+        cur.sumLat += p.lat;
+        cur.sumLng += p.lng;
+        cur.placeId = cur.placeId || p.placeId;
+      } else {
+        finalize();
+        cur = { start: p.ts, end: p.ts, n: 1, sumLat: p.lat, sumLng: p.lng, placeId: p.placeId };
+      }
+    }
+    finalize();
+    return stays;
+  }
+
+  // ---------- Optional reverse geocoding (Nominatim) ----------
+  async function nominatimReverse(lat, lng) {
+    // Uses jsonv2 reverse endpoint. Rate limited by caller.
+    const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lng)}&zoom=10&addressdetails=1`;
+    const res = await fetch(url, { headers: { "Accept": "application/json" } });
+    if (!res.ok) throw new Error(`Nominatim ${res.status}`);
+    return await res.json();
+  }
+
+  async function enrichGeo(items) {
+    if (!$enableGeocode.checked) return items;
+
+    // Only geocode unique coords missing any usable address/name (or missing country/city inference)
+    const need = [];
+    for (const it of items) {
+      const k = coordKey(it.lat, it.lng);
+      const cached = geoCache.get(k);
+      if (cached) continue;
+      // If semantic has address, we can still geocode, but it's optional.
+      // We'll prioritize filling city/country for everything.
+      need.push({ k, lat: it.lat, lng: it.lng });
+    }
+
+    // De-dupe
+    const uniq = [];
+    const seen = new Set();
+    for (const x of need) {
+      if (seen.has(x.k)) continue;
+      seen.add(x.k);
+      uniq.push(x);
+    }
+    if (!uniq.length) return items;
+
+    // Rate limit to 1 req/sec (policy) and persist results.
+    // Usage policy: no more than 1 request per second and identify app via Referer/User-Agent. In-browser will send Referer. :contentReference[oaicite:5]{index=5}
+    for (let i=0; i<uniq.length; i++) {
+      const x = uniq[i];
+      try {
+        setSummaryStatus(`Geocoding ${i+1}/${uniq.length}…`, "warn");
+        const data = await nominatimReverse(x.lat, x.lng);
+        const addr = data.address || {};
+        geoCache.set(x.k, {
+          country: addr.country || null,
+          country_code: addr.country_code || null,
+          city: bestCity(addr),
+          state: addr.state || addr.region || null,
+          display_name: data.display_name || null
+        });
+        persistGeoCache();
+      } catch (e) {
+        geoCache.set(x.k, { country:null, city:null, state:null, display_name:null, error: String(e) });
+      }
+      // 1 req/sec
+      await new Promise(r => setTimeout(r, 1000));
+    }
+
+    setSummaryStatus(`Geocoding done (${uniq.length} coords).`, "ok");
+    return items;
+  }
+
+  function setSummaryStatus(text, kind) {
+    // render uses summary pills; this is a lightweight status updater
+    const el = document.getElementById("statusPill");
+    if (el) {
+      el.textContent = text;
+      el.classList.remove("warn","ok");
+      if (kind) el.classList.add(kind);
+    }
+  }
+
+  // ---------- Aggregation ----------
+  function aggregate(items) {
+    const places = new Map();
+    const cities = new Map();
+    const countries = new Map();
+
+    const normPlaceName = (it) => it.name || (it.address ? it.address.split("\n")[0] : null) || (it.placeId ? it.placeId : coordKey(it.lat, it.lng));
+
+    for (const it of items) {
+      const k = coordKey(it.lat, it.lng);
+      const geo = geoCache.get(k) || {};
+      const country = geo.country || null;
+      const city = geo.city || null;
+
+      // Places
+      const placeKey = it.placeId || k;
+      if (!places.has(placeKey)) {
+        places.set(placeKey, {
+          key: placeKey,
+          name: normPlaceName(it),
+          lat: it.lat, lng: it.lng,
+          visits: 0,
+          seconds: 0,
+          city, country
+        });
+      }
+      const p = places.get(placeKey);
+      p.visits += 1;
+      p.seconds += it.seconds || 0;
+      // Prefer filled fields
+      p.city = p.city || city;
+      p.country = p.country || country;
+
+      // Cities
+      if (city) {
+        const ck = `${city}${country ? ", " + country : ""}`;
+        if (!cities.has(ck)) cities.set(ck, { name: ck, visits: 0, seconds: 0 });
+        const c = cities.get(ck);
+        c.visits += 1;
+        c.seconds += it.seconds || 0;
+      }
+
+      // Countries
+      if (country) {
+        if (!countries.has(country)) countries.set(country, { name: country, visits: 0, seconds: 0 });
+        const c = countries.get(country);
+        c.visits += 1;
+        c.seconds += it.seconds || 0;
+      }
+    }
+
+    const arrSort = (m) => Array.from(m.values()).sort((a,b) => (b.seconds - a.seconds) || (b.visits - a.visits));
+
+    return {
+      countries: arrSort(countries),
+      cities: arrSort(cities),
+      places: arrSort(places),
+    };
+  }
+
+  // ---------- Rendering ----------
+  function renderSummary(meta) {
+    const pills = [];
+    pills.push(`<div class="pill">Type: <b>${meta.type}</b></div>`);
+    pills.push(`<div class="pill">Items: <b>${meta.count}</b></div>`);
+    pills.push(`<div class="pill">Places: <b>${meta.places}</b></div>`);
+    pills.push(`<div class="pill">Cities: <b>${meta.cities}</b></div>`);
+    pills.push(`<div class="pill">Countries: <b>${meta.countries}</b></div>`);
+    pills.push(`<div class="pill" id="statusPill">Ready</div>`);
+    $summary.innerHTML = pills.join("");
+  }
+
+  function renderTable(rows, kind) {
+    if (!rows || !rows.length) {
+      $tableWrap.innerHTML = `<div class="muted">No data yet. (If you loaded Records.json, enable enrichment to get cities/countries.)</div>`;
+      return;
+    }
+
+    const head = kind === "visits"
+      ? `<tr><th>#</th><th>When</th><th>Where</th><th>Duration</th></tr>`
+      : `<tr><th>#</th><th>${kind.slice(0,1).toUpperCase()+kind.slice(1,kind.length-1)}</th><th>Visits</th><th>Time</th></tr>`;
+
+    const body = kind === "visits"
+      ? rows.slice(0, 500).map((r,i) => {
+          const when = `${r.start || "?"} → ${r.end || "?"}`;
+          const where = `${r.name || r.address?.split("\n")[0] || "Unknown"}<div class="muted">${(r.address || "").replaceAll("\n"," · ")}</div>`;
+          return `<tr>
+            <td>${i+1}</td>
+            <td><code>${when}</code></td>
+            <td>${where}</td>
+            <td>${fmtDuration(r.seconds || 0)}</td>
+          </tr>`;
+        }).join("")
+      : rows.slice(0, 300).map((r,i) => `<tr>
+          <td>${i+1}</td>
+          <td>${escapeHtml(r.name || r.key || "—")}</td>
+          <td>${r.visits ?? "—"}</td>
+          <td>${fmtDuration(r.seconds || 0)}</td>
+        </tr>`).join("");
+
+    $tableWrap.innerHTML = `<table>${head}${body}</table>`;
+  }
+
+  function escapeHtml(s) {
+    return String(s).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
+  }
+
+  function renderMarkers(topPlaces) {
+    markersLayer.clearLayers();
+    const bounds = [];
+    for (const p of topPlaces.slice(0, 200)) {
+      const m = L.marker([p.lat, p.lng]);
+      const label = `<b>${escapeHtml(p.name || p.key)}</b><br/>Visits: ${p.visits}<br/>Time: ${fmtDuration(p.seconds)}<br/>${p.city ? escapeHtml(p.city) : ""}${p.country ? ", " + escapeHtml(p.country) : ""}`;
+      m.bindPopup(label);
+      m.addTo(markersLayer);
+      bounds.push([p.lat, p.lng]);
+    }
+    if (bounds.length) map.fitBounds(bounds, { padding: [30, 30] });
+  }
+
+  function render() {
+    if (!visits.length || !agg) return;
+
+    const meta = {
+      type: visits[0]?.kind === "placeVisit" ? "Semantic Location History" : "Records.json (approx stays)",
+      count: visits.length,
+      places: agg.places.length,
+      cities: agg.cities.length,
+      countries: agg.countries.length,
+    };
+    renderSummary(meta);
+
+    if (currentTab === "countries") renderTable(agg.countries, "countries");
+    if (currentTab === "cities") renderTable(agg.cities, "cities");
+    if (currentTab === "places") renderTable(agg.places, "places");
+    if (currentTab === "visits") renderTable(visits, "visits");
+
+    renderMarkers(agg.places);
+  }
+
+  // ---------- Load flow ----------
+  $fileInput.addEventListener("change", async (e) => {
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
+
+    resetAll();
+    $tableWrap.innerHTML = `<div class="muted">Loading ${files.length} file(s)…</div>`;
+
+    try {
+      const allJson = [];
+      for (const f of files) {
+        const txt = await f.text();
+        allJson.push(JSON.parse(txt));
+      }
+
+      const type = detectType(allJson[0]);
+if (type === "unknown") {
+  $tableWrap.innerHTML = `<div class="warn">Couldn’t detect format. Expected either Takeout (timelineObjects/locations) or on-device export (semanticSegments or top-level array).</div>`;
+  return;
+}
+
+if (type === "semantic_takeout") {
+  visits = extractSemantic(allJson);               // existing
+} else if (type === "records_takeout") {
+  visits = extractRecordsAsStays(allJson);         // existing
+} else if (type === "device_export_array") {
+  // your file: each JSON is an array; merge them
+  visits = allJson.flatMap(j => extractDeviceExportVisits(j));
+} else if (type === "device_export_object") {
+  visits = allJson.flatMap(j => extractDeviceExportVisits(j));
+}
+
+// Optional geocode enrichment (unchanged)
+await enrichGeo(visits);
+
+agg = aggregate(visits);
+render();
+
+      if (type === "semantic") {
+        visits = extractSemantic(allJson);
+      } else {
+        visits = extractRecordsAsStays(allJson);
+      }
+
+      // Optional geocode enrichment
+      await enrichGeo(visits);
+
+      agg = aggregate(visits);
+      render();
+    } catch (err) {
+      console.error(err);
+      $tableWrap.innerHTML = `<div class="warn">Error parsing JSON: ${escapeHtml(err?.message || String(err))}</div>`;
+    }
+  });
+</script>
+</body>
+</html>
