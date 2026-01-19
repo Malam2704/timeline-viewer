@@ -627,59 +627,40 @@ function extractDeviceExportVisits(json) {
   // ---------- Load flow ----------
   async function loadDefaultFile() {
     $tableWrap.innerHTML = `<div class="muted">Loading location-history.json...</div>`;
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 sec timeout
-      const response = await fetch('./location-history.json', { signal: controller.signal });
-      clearTimeout(timeoutId);
-      if (!response.ok) {
-        if (response.status === 404) {
-          $tableWrap.innerHTML = `
-            <div class="muted">
-              <h3>No location data found</h3>
-              <p>To use this app, you need your Google Location History data:</p>
-              <ol>
-                <li>Open Google Maps on your phone</li>
-                <li>Go to Settings → Your data in Maps</li>
-                <li>Tap "Download your Maps data"</li>
-                <li>Select "Location History" and choose JSON format</li>
-                <li>Download and place the <code>location-history.json</code> file in this directory</li>
-                <li>Refresh this page</li>
-              </ol>
-              <p>Alternatively, use the file input above to load your data manually.</p>
-            </div>
-          `;
-          return;
-        }
-        throw new Error('Failed to load location-history.json');
+    const worker = new Worker('./worker.js');
+    worker.onmessage = function(e) {
+      if (e.data.type === 'progress') {
+        $tableWrap.innerHTML = `<div class="muted">${e.data.message}</div>`;
+      } else if (e.data.type === 'done') {
+        processJson(e.data.data);
+        worker.terminate();
+      } else if (e.data.type === 'error') {
+        $tableWrap.innerHTML = `<div class="warn">Error: ${escapeHtml(e.data.error)}</div>`;
+        worker.terminate();
       }
-      $tableWrap.innerHTML = `<div class="muted">Parsing data...</div>`;
-      const json = await response.json();
-      $tableWrap.innerHTML = `<div class="muted">Processing visits...</div>`;
-      const allJson = [json];
-      const type = detectType(allJson[0]);
-      if (type === "unknown") {
-        $tableWrap.innerHTML = `<div class="warn">Couldn\'t detect format in location-history.json.</div>`;
-        return;
-      }
-      if (type === "device_export_array") {
-        visits = extractDeviceExportVisits(json);
-      } else {
-        visits = extractSemantic(allJson);
-      }
-      $tableWrap.innerHTML = `<div class="muted">Enriching data...</div>`;
-      await enrichGeo(visits);
+    };
+    worker.postMessage('./location-history.json');
+  }
+
+  function processJson(json) {
+    $tableWrap.innerHTML = `<div class="muted">Processing visits...</div>`;
+    const allJson = [json];
+    const type = detectType(allJson[0]);
+    if (type === "unknown") {
+      $tableWrap.innerHTML = `<div class="warn">Couldn\'t detect format in location-history.json.</div>`;
+      return;
+    }
+    if (type === "device_export_array") {
+      visits = extractDeviceExportVisits(json);
+    } else {
+      visits = extractSemantic(allJson);
+    }
+    $tableWrap.innerHTML = `<div class="muted">Enriching data...</div>`;
+    enrichGeo(visits).then(() => {
       $tableWrap.innerHTML = `<div class="muted">Aggregating...</div>`;
       agg = aggregate(visits);
       render();
-    } catch (err) {
-      console.error(err);
-      if (err.name === 'AbortError') {
-        $tableWrap.innerHTML = `<div class="warn">Loading location-history.json timed out. The file might be too large. Try using the file input to load it manually.</div>`;
-      } else {
-        $tableWrap.innerHTML = `<div class="warn">Error loading location-history.json: ${escapeHtml(err?.message || String(err))}</div>`;
-      }
-    }
+    });
   }
 
   // Load default file on page load
@@ -721,18 +702,6 @@ await enrichGeo(visits);
 
 agg = aggregate(visits);
 render();
-
-      if (type === "semantic") {
-        visits = extractSemantic(allJson);
-      } else {
-        visits = extractRecordsAsStays(allJson);
-      }
-
-      // Optional geocode enrichment
-      await enrichGeo(visits);
-
-      agg = aggregate(visits);
-      render();
     } catch (err) {
       console.error(err);
       $tableWrap.innerHTML = `<div class="warn">Error parsing JSON: ${escapeHtml(err?.message || String(err))}</div>`;
