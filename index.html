@@ -626,8 +626,12 @@ function extractDeviceExportVisits(json) {
 
   // ---------- Load flow ----------
   async function loadDefaultFile() {
+    $tableWrap.innerHTML = `<div class="muted">Loading location-history.json...</div>`;
     try {
-      const response = await fetch('./location-history.json');
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 sec timeout
+      const response = await fetch('./location-history.json', { signal: controller.signal });
+      clearTimeout(timeoutId);
       if (!response.ok) {
         if (response.status === 404) {
           $tableWrap.innerHTML = `
@@ -649,7 +653,9 @@ function extractDeviceExportVisits(json) {
         }
         throw new Error('Failed to load location-history.json');
       }
+      $tableWrap.innerHTML = `<div class="muted">Parsing data...</div>`;
       const json = await response.json();
+      $tableWrap.innerHTML = `<div class="muted">Processing visits...</div>`;
       const allJson = [json];
       const type = detectType(allJson[0]);
       if (type === "unknown") {
@@ -661,12 +667,18 @@ function extractDeviceExportVisits(json) {
       } else {
         visits = extractSemantic(allJson);
       }
+      $tableWrap.innerHTML = `<div class="muted">Enriching data...</div>`;
       await enrichGeo(visits);
+      $tableWrap.innerHTML = `<div class="muted">Aggregating...</div>`;
       agg = aggregate(visits);
       render();
     } catch (err) {
       console.error(err);
-      $tableWrap.innerHTML = `<div class="warn">Error loading location-history.json: ${escapeHtml(err?.message || String(err))}</div>`;
+      if (err.name === 'AbortError') {
+        $tableWrap.innerHTML = `<div class="warn">Loading location-history.json timed out. The file might be too large. Try using the file input to load it manually.</div>`;
+      } else {
+        $tableWrap.innerHTML = `<div class="warn">Error loading location-history.json: ${escapeHtml(err?.message || String(err))}</div>`;
+      }
     }
   }
 
