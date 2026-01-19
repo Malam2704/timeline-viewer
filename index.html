@@ -586,6 +586,54 @@ function extractDeviceExportVisits(json) {
   }
 
   // ---------- Load flow ----------
+  async function loadDefaultFile() {
+    try {
+      const response = await fetch('./location-history.json');
+      if (!response.ok) {
+        if (response.status === 404) {
+          $tableWrap.innerHTML = `
+            <div class="muted">
+              <h3>No location data found</h3>
+              <p>To use this app, you need your Google Location History data:</p>
+              <ol>
+                <li>Open Google Maps on your phone</li>
+                <li>Go to Settings → Your data in Maps</li>
+                <li>Tap "Download your Maps data"</li>
+                <li>Select "Location History" and choose JSON format</li>
+                <li>Download and place the <code>location-history.json</code> file in this directory</li>
+                <li>Refresh this page</li>
+              </ol>
+              <p>Alternatively, use the file input above to load your data manually.</p>
+            </div>
+          `;
+          return;
+        }
+        throw new Error('Failed to load location-history.json');
+      }
+      const json = await response.json();
+      const allJson = [json];
+      const type = detectType(allJson[0]);
+      if (type === "unknown") {
+        $tableWrap.innerHTML = `<div class="warn">Couldn\'t detect format in location-history.json.</div>`;
+        return;
+      }
+      if (type === "device_export_array") {
+        visits = extractDeviceExportVisits(json);
+      } else {
+        visits = extractSemantic(allJson);
+      }
+      await enrichGeo(visits);
+      agg = aggregate(visits);
+      render();
+    } catch (err) {
+      console.error(err);
+      $tableWrap.innerHTML = `<div class="warn">Error loading location-history.json: ${escapeHtml(err?.message || String(err))}</div>`;
+    }
+  }
+
+  // Load default file on page load
+  loadDefaultFile();
+
   $fileInput.addEventListener("change", async (e) => {
     const files = Array.from(e.target.files || []);
     if (!files.length) return;
