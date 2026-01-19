@@ -101,6 +101,26 @@
   }).addTo(map);
 
   const markersLayer = L.layerGroup().addTo(map);
+  let markers = new Map();
+  let selectedMarker = null;
+
+  const defaultIcon = L.icon({
+    iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
+    shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
+    iconSize: [25, 41],
+    iconAnchor: [12, 41],
+    popupAnchor: [1, -34],
+    shadowSize: [41, 41]
+  });
+
+  const selectedIcon = L.icon({
+    iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png',
+    shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
+    iconSize: [25, 41],
+    iconAnchor: [12, 41],
+    popupAnchor: [1, -34],
+    shadowSize: [41, 41]
+  });
 
   // ---------- Helpers ----------
   const e7ToDeg = (v) => (typeof v === "number" ? v / 1e7 : null);
@@ -538,7 +558,7 @@ function extractDeviceExportVisits(json) {
             <td>${fmtDuration(r.seconds || 0)}</td>
           </tr>`;
         }).join("")
-      : (kind === "places" ? rows : rows.slice(0, 300)).map((r,i) => `<tr>
+      : (kind === "places" ? rows : rows.slice(0, 300)).map((r,i) => `<tr class="${kind === 'places' ? 'place-row' : ''}">
           <td>${i+1}</td>
           <td>${escapeHtml(r.name || r.key || "—")}</td>
           <td>${r.visits ?? "—"}</td>
@@ -546,20 +566,39 @@ function extractDeviceExportVisits(json) {
         </tr>`).join("");
 
     $tableWrap.innerHTML = `<table>${head}${body}</table>`;
+    if (kind === "places") {
+      document.querySelectorAll('.place-row').forEach((tr, i) => {
+        tr.addEventListener('click', () => {
+          const r = rows[i];
+          selectMarker(r.key);
+        });
+        tr.style.cursor = 'pointer';
+      });
+    }
   }
 
-  function escapeHtml(s) {
-    return String(s).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
+  function selectMarker(key) {
+    if (selectedMarker) {
+      selectedMarker.setIcon(defaultIcon);
+    }
+    selectedMarker = markers.get(key);
+    if (selectedMarker) {
+      selectedMarker.setIcon(selectedIcon);
+      map.setView(selectedMarker.getLatLng(), 15);
+    }
   }
 
   function renderMarkers(topPlaces) {
+    selectedMarker = null;
+    markers.clear();
     markersLayer.clearLayers();
     const bounds = [];
     for (const p of topPlaces.slice(0, 500)) {
-      const m = L.marker([p.lat, p.lng]);
+      const m = L.marker([p.lat, p.lng], { icon: defaultIcon });
       const label = `<b>${escapeHtml(p.name || p.key)}</b><br/>Visits: ${p.visits}<br/>Time: ${fmtDuration(p.seconds)}<br/>${p.city ? escapeHtml(p.city) : ""}${p.country ? ", " + escapeHtml(p.country) : ""}`;
       m.bindPopup(label);
       m.addTo(markersLayer);
+      markers.set(p.key, m);
       bounds.push([p.lat, p.lng]);
     }
     if (bounds.length) map.fitBounds(bounds, { padding: [30, 30] });
