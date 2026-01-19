@@ -203,7 +203,8 @@ function aggregate(items, geoCache) {
         lat: it.lat, lng: it.lng,
         visits: 0,
         seconds: 0,
-        city, country
+        city, country,
+        zoom: 15
       });
     }
     const p = places.get(placeKey);
@@ -214,19 +215,64 @@ function aggregate(items, geoCache) {
 
     if (city) {
       const ck = `${city}${country ? ", " + country : ""}`;
-      if (!cities.has(ck)) cities.set(ck, { name: ck, visits: 0, seconds: 0 });
+      if (!cities.has(ck)) {
+        cities.set(ck, {
+          key: `city:${ck}`,
+          name: ck,
+          city,
+          country,
+          visits: 0,
+          seconds: 0,
+          sumLat: 0,
+          sumLng: 0,
+          n: 0,
+          zoom: 10
+        });
+      }
       const c = cities.get(ck);
       c.visits += 1;
       c.seconds += it.seconds || 0;
+      c.sumLat += it.lat;
+      c.sumLng += it.lng;
+      c.n += 1;
     }
 
     if (country) {
-      if (!countries.has(country)) countries.set(country, { name: country, visits: 0, seconds: 0 });
+      if (!countries.has(country)) {
+        countries.set(country, {
+          key: `country:${country}`,
+          name: country,
+          country,
+          visits: 0,
+          seconds: 0,
+          sumLat: 0,
+          sumLng: 0,
+          n: 0,
+          zoom: 4
+        });
+      }
       const c = countries.get(country);
       c.visits += 1;
       c.seconds += it.seconds || 0;
+      c.sumLat += it.lat;
+      c.sumLng += it.lng;
+      c.n += 1;
     }
   }
+
+  const finalize = (m) => {
+    for (const v of m.values()) {
+      if (v.n) {
+        v.lat = v.sumLat / v.n;
+        v.lng = v.sumLng / v.n;
+      }
+      delete v.sumLat;
+      delete v.sumLng;
+      delete v.n;
+    }
+  };
+  finalize(cities);
+  finalize(countries);
 
   const arrSort = (m) => Array.from(m.values()).sort((a, b) => (b.seconds - a.seconds) || (b.visits - a.visits));
   return {

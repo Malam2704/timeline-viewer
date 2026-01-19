@@ -161,6 +161,12 @@
 
   const bestCity = (addr) =>
     addr.city || addr.town || addr.village || addr.hamlet || addr.city_district || addr.suburb || null;
+  const formatCityCountry = (city, country) => {
+    const parts = [];
+    if (city) parts.push(city);
+    if (country) parts.push(country);
+    return parts.join(", ");
+  };
 
   // ---------- State ----------
   const VISITS_PREVIEW_LIMIT = 500;
@@ -512,7 +518,8 @@ function extractDeviceExportVisits(json) {
           lat: it.lat, lng: it.lng,
           visits: 0,
           seconds: 0,
-          city, country
+          city, country,
+          zoom: 15
         });
       }
       const p = places.get(placeKey);
@@ -525,20 +532,65 @@ function extractDeviceExportVisits(json) {
       // Cities
       if (city) {
         const ck = `${city}${country ? ", " + country : ""}`;
-        if (!cities.has(ck)) cities.set(ck, { name: ck, visits: 0, seconds: 0 });
+        if (!cities.has(ck)) {
+          cities.set(ck, {
+            key: `city:${ck}`,
+            name: ck,
+            city,
+            country,
+            visits: 0,
+            seconds: 0,
+            sumLat: 0,
+            sumLng: 0,
+            n: 0,
+            zoom: 10
+          });
+        }
         const c = cities.get(ck);
         c.visits += 1;
         c.seconds += it.seconds || 0;
+        c.sumLat += it.lat;
+        c.sumLng += it.lng;
+        c.n += 1;
       }
 
       // Countries
       if (country) {
-        if (!countries.has(country)) countries.set(country, { name: country, visits: 0, seconds: 0 });
+        if (!countries.has(country)) {
+          countries.set(country, {
+            key: `country:${country}`,
+            name: country,
+            country,
+            visits: 0,
+            seconds: 0,
+            sumLat: 0,
+            sumLng: 0,
+            n: 0,
+            zoom: 4
+          });
+        }
         const c = countries.get(country);
         c.visits += 1;
         c.seconds += it.seconds || 0;
+        c.sumLat += it.lat;
+        c.sumLng += it.lng;
+        c.n += 1;
       }
     }
+
+    const finalize = (m) => {
+      for (const v of m.values()) {
+        if (v.n) {
+          v.lat = v.sumLat / v.n;
+          v.lng = v.sumLng / v.n;
+        }
+        delete v.sumLat;
+        delete v.sumLng;
+        delete v.n;
+      }
+    };
+    finalize(cities);
+    finalize(countries);
 
     const arrSort = (m) => Array.from(m.values()).sort((a,b) => (b.seconds - a.seconds) || (b.visits - a.visits));
 
@@ -571,8 +623,12 @@ function extractDeviceExportVisits(json) {
       ? `<tr><th>#</th><th>When</th><th>Where</th><th>Duration</th></tr>`
       : `<tr><th>#</th><th>${kind.slice(0,1).toUpperCase()+kind.slice(1,kind.length-1)}</th><th>Visits</th><th>Time</th></tr>`;
 
+    let renderRows = rows;
+    if (kind === "visits") renderRows = rows.slice(0, VISITS_PREVIEW_LIMIT);
+    if (kind !== "visits" && kind !== "places") renderRows = rows.slice(0, 300);
+
     const body = kind === "visits"
-      ? rows.slice(0, VISITS_PREVIEW_LIMIT).map((r,i) => {
+      ? renderRows.map((r,i) => {
           const when = `${r.start || "?"} → ${r.end || "?"}`;
           const where = `${r.name || r.address?.split("\n")[0] || "Unknown"}<div class="muted">${(r.address || "").replaceAll("\n"," · ")}</div>`;
           return `<tr>
@@ -582,22 +638,22 @@ function extractDeviceExportVisits(json) {
             <td>${fmtDuration(r.seconds || 0)}</td>
           </tr>`;
         }).join("")
-      : (kind === "places" ? rows : rows.slice(0, 300)).map((r,i) => `<tr class="${kind === 'places' ? 'place-row' : ''}">
+      : renderRows.map((r,i) => `<tr class="marker-row">
           <td>${i+1}</td>
           <td>${escapeHtml(r.name || r.key || "—")}</td>
           <td>${r.visits ?? "—"}</td>
           <td>${fmtDuration(r.seconds || 0)}</td>
         </tr>`).join("");
 
-    const note = (kind === "visits" && totalCount && totalCount > rows.length)
-      ? `<div class="small muted">Showing first ${rows.length} of ${totalCount} visits.</div>`
+    const note = (kind === "visits" && totalCount && totalCount > renderRows.length)
+      ? `<div class="small muted">Showing first ${renderRows.length} of ${totalCount} visits.</div>`
       : "";
     $tableWrap.innerHTML = `${note}<table>${head}${body}</table>`;
-    if (kind === "places") {
-      document.querySelectorAll('.place-row').forEach((tr, i) => {
+    if (kind === "places" || kind === "cities" || kind === "countries") {
+      document.querySelectorAll('.marker-row').forEach((tr, i) => {
         tr.addEventListener('click', () => {
-          const r = rows[i];
-          selectMarker(r.key);
+          const r = renderRows[i];
+          if (r?.key) selectMarker(r.key);
         });
         tr.style.cursor = 'pointer';
       });
@@ -631,7 +687,8 @@ function extractDeviceExportVisits(json) {
       });
       if (!selectedPopup) selectedPopup = L.popup({ closeButton: true, autoPan: true });
       const d = entry.data;
-      const label = `<b>${escapeHtml(d.name || d.key)}</b><br/>Visits: ${d.visits}<br/>Time: ${fmtDuration(d.seconds)}<br/>${d.city ? escapeHtml(d.city) : ""}${d.country ? ", " + escapeHtml(d.country) : ""}`;
+      const locationLine = formatCityCountry(d.city, d.country);
+      const label = `<b>${escapeHtml(d.name || d.key)}</b><br/>Visits: ${d.visits}<br/>Time: ${fmtDuration(d.seconds)}${locationLine ? `<br/>${escapeHtml(locationLine)}` : ""}`;
       selectedPopup.setLatLng(entry.layer.getLatLng()).setContent(label).openOn(map);
     } else {
       entry.layer.setIcon(selectedIcon);
@@ -646,11 +703,12 @@ function extractDeviceExportVisits(json) {
     selectedMarker = markers.get(key) || null;
     if (selectedMarker) {
       setMarkerSelected(selectedMarker);
-      map.setView(selectedMarker.layer.getLatLng(), 15);
+      const zoom = selectedMarker.data?.zoom || 15;
+      map.setView(selectedMarker.layer.getLatLng(), zoom);
     }
   }
 
-  function renderMarkers(topPlaces) {
+  function renderMarkers(items) {
     selectedMarker = null;
     markers.clear();
     markersLayer.clearLayers();
@@ -658,14 +716,17 @@ function extractDeviceExportVisits(json) {
       selectedPopup.remove();
       selectedPopup = null;
     }
-    if (!topPlaces || !topPlaces.length) return;
+    if (!items || !items.length) return;
 
-    const useCanvas = topPlaces.length > 2000;
+    const points = items.filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lng));
+    if (!points.length) return;
+
+    const useCanvas = points.length > 2000;
     markerMode = useCanvas ? "canvas" : "icon";
     const renderer = useCanvas ? L.canvas({ padding: 0.2 }) : null;
     const bounds = [];
 
-    for (const p of topPlaces) {
+    for (const p of points) {
       let layer = null;
       if (useCanvas) {
         layer = L.circleMarker([p.lat, p.lng], {
@@ -678,7 +739,8 @@ function extractDeviceExportVisits(json) {
         });
       } else {
         layer = L.marker([p.lat, p.lng], { icon: defaultIcon });
-        const label = `<b>${escapeHtml(p.name || p.key)}</b><br/>Visits: ${p.visits}<br/>Time: ${fmtDuration(p.seconds)}<br/>${p.city ? escapeHtml(p.city) : ""}${p.country ? ", " + escapeHtml(p.country) : ""}`;
+        const locationLine = formatCityCountry(p.city, p.country);
+        const label = `<b>${escapeHtml(p.name || p.key)}</b><br/>Visits: ${p.visits}<br/>Time: ${fmtDuration(p.seconds)}${locationLine ? `<br/>${escapeHtml(locationLine)}` : ""}`;
         layer.bindPopup(label);
       }
       layer.addTo(markersLayer);
@@ -686,6 +748,15 @@ function extractDeviceExportVisits(json) {
       bounds.push([p.lat, p.lng]);
     }
     if (bounds.length) map.fitBounds(bounds, { padding: [30, 30] });
+  }
+
+  function markersForTab() {
+    if (!agg) return [];
+    if (currentTab === "countries") return agg.countries || [];
+    if (currentTab === "cities") return agg.cities || [];
+    if (currentTab === "places") return agg.places || [];
+    if (currentTab === "visits") return agg.places || [];
+    return agg.places || [];
   }
 
   function render() {
@@ -707,6 +778,7 @@ function extractDeviceExportVisits(json) {
     if (currentTab === "places") renderTable(agg.places, "places");
     if (currentTab === "visits") renderTable(visits, "visits", visitsCount);
 
+    renderMarkers(markersForTab());
   }
 
   // ---------- Load flow ----------
@@ -747,7 +819,6 @@ function extractDeviceExportVisits(json) {
           $tableWrap.innerHTML = `<div class="muted">Aggregating...</div>`;
           agg = aggregate(visits);
           visits = visits.slice(0, VISITS_PREVIEW_LIMIT);
-          renderMarkers(agg.places);
           render();
         }).finally(() => {
           worker.terminate();
@@ -761,7 +832,6 @@ function extractDeviceExportVisits(json) {
       if (!agg) {
         $tableWrap.innerHTML = `<div class="warn">No aggregated data returned.</div>`;
       } else {
-        renderMarkers(agg.places);
         render();
       }
       worker.terminate();
