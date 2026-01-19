@@ -126,6 +126,12 @@
   const e7ToDeg = (v) => (typeof v === "number" ? v / 1e7 : null);
   const round = (v, d=4) => Math.round(v * (10**d)) / (10**d);
   const coordKey = (lat, lng) => `${round(lat,4)},${round(lng,4)}`;
+  const escapeHtml = (v) => String(v)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 
   const parseIso = (s) => {
     const t = Date.parse(s);
@@ -157,10 +163,16 @@
     addr.city || addr.town || addr.village || addr.hamlet || addr.city_district || addr.suburb || null;
 
   // ---------- State ----------
+  const VISITS_PREVIEW_LIMIT = 500;
   let currentTab = "countries";
-  let visits = [];      // normalized list
+  let visits = [];      // preview list for table
+  let visitsCount = 0;  // full count (all visits)
+  let dataType = "Unknown";
   let agg = null;       // aggregations
   let geoCache = new Map(); // in-memory per session
+  let activeWorker = null;
+  let markerMode = "icon";
+  let selectedPopup = null;
 
   // Load any cached geocodes from localStorage (per rounded coord)
   try {
@@ -198,8 +210,20 @@
   $resetBtn.addEventListener("click", resetAll);
 
   function resetAll() {
+    if (activeWorker) {
+      activeWorker.terminate();
+      activeWorker = null;
+    }
     visits = [];
+    visitsCount = 0;
+    dataType = "Unknown";
     agg = null;
+    markers.clear();
+    selectedMarker = null;
+    if (selectedPopup) {
+      selectedPopup.remove();
+      selectedPopup = null;
+    }
     markersLayer.clearLayers();
     $summary.innerHTML = "";
     $tableWrap.innerHTML = `<div class="muted">Load your JSON file(s) to start.</div>`;
@@ -537,7 +561,7 @@ function extractDeviceExportVisits(json) {
     $summary.innerHTML = pills.join("");
   }
 
-  function renderTable(rows, kind) {
+  function renderTable(rows, kind, totalCount) {
     if (!rows || !rows.length) {
       $tableWrap.innerHTML = `<div class="muted">No data yet. (If you loaded Records.json, enable enrichment to get cities/countries.)</div>`;
       return;
@@ -548,7 +572,7 @@ function extractDeviceExportVisits(json) {
       : `<tr><th>#</th><th>${kind.slice(0,1).toUpperCase()+kind.slice(1,kind.length-1)}</th><th>Visits</th><th>Time</th></tr>`;
 
     const body = kind === "visits"
-      ? rows.slice(0, 500).map((r,i) => {
+      ? rows.slice(0, VISITS_PREVIEW_LIMIT).map((r,i) => {
           const when = `${r.start || "?"} → ${r.end || "?"}`;
           const where = `${r.name || r.address?.split("\n")[0] || "Unknown"}<div class="muted">${(r.address || "").replaceAll("\n"," · ")}</div>`;
           return `<tr>
@@ -565,7 +589,10 @@ function extractDeviceExportVisits(json) {
           <td>${fmtDuration(r.seconds || 0)}</td>
         </tr>`).join("");
 
-    $tableWrap.innerHTML = `<table>${head}${body}</table>`;
+    const note = (kind === "visits" && totalCount && totalCount > rows.length)
+      ? `<div class="small muted">Showing first ${rows.length} of ${totalCount} visits.</div>`
+      : "";
+    $tableWrap.innerHTML = `${note}<table>${head}${body}</table>`;
     if (kind === "places") {
       document.querySelectorAll('.place-row').forEach((tr, i) => {
         tr.addEventListener('click', () => {
@@ -577,14 +604,49 @@ function extractDeviceExportVisits(json) {
     }
   }
 
+  function resetMarkerStyle(entry) {
+    if (!entry) return;
+    if (markerMode === "canvas") {
+      entry.layer.setStyle({
+        radius: 4,
+        color: "#9bbcff",
+        fillColor: "#9bbcff",
+        fillOpacity: 0.7,
+        weight: 1
+      });
+    } else {
+      entry.layer.setIcon(defaultIcon);
+    }
+  }
+
+  function setMarkerSelected(entry) {
+    if (!entry) return;
+    if (markerMode === "canvas") {
+      entry.layer.setStyle({
+        radius: 6,
+        color: "#ff6b6b",
+        fillColor: "#ff6b6b",
+        fillOpacity: 0.9,
+        weight: 1.5
+      });
+      if (!selectedPopup) selectedPopup = L.popup({ closeButton: true, autoPan: true });
+      const d = entry.data;
+      const label = `<b>${escapeHtml(d.name || d.key)}</b><br/>Visits: ${d.visits}<br/>Time: ${fmtDuration(d.seconds)}<br/>${d.city ? escapeHtml(d.city) : ""}${d.country ? ", " + escapeHtml(d.country) : ""}`;
+      selectedPopup.setLatLng(entry.layer.getLatLng()).setContent(label).openOn(map);
+    } else {
+      entry.layer.setIcon(selectedIcon);
+      entry.layer.openPopup();
+    }
+  }
+
   function selectMarker(key) {
     if (selectedMarker) {
-      selectedMarker.setIcon(defaultIcon);
+      resetMarkerStyle(selectedMarker);
     }
-    selectedMarker = markers.get(key);
+    selectedMarker = markers.get(key) || null;
     if (selectedMarker) {
-      selectedMarker.setIcon(selectedIcon);
-      map.setView(selectedMarker.getLatLng(), 15);
+      setMarkerSelected(selectedMarker);
+      map.setView(selectedMarker.layer.getLatLng(), 15);
     }
   }
 
@@ -592,24 +654,48 @@ function extractDeviceExportVisits(json) {
     selectedMarker = null;
     markers.clear();
     markersLayer.clearLayers();
+    if (selectedPopup) {
+      selectedPopup.remove();
+      selectedPopup = null;
+    }
+    if (!topPlaces || !topPlaces.length) return;
+
+    const useCanvas = topPlaces.length > 2000;
+    markerMode = useCanvas ? "canvas" : "icon";
+    const renderer = useCanvas ? L.canvas({ padding: 0.2 }) : null;
     const bounds = [];
-    for (const p of topPlaces.slice(0, 500)) {
-      const m = L.marker([p.lat, p.lng], { icon: defaultIcon });
-      const label = `<b>${escapeHtml(p.name || p.key)}</b><br/>Visits: ${p.visits}<br/>Time: ${fmtDuration(p.seconds)}<br/>${p.city ? escapeHtml(p.city) : ""}${p.country ? ", " + escapeHtml(p.country) : ""}`;
-      m.bindPopup(label);
-      m.addTo(markersLayer);
-      markers.set(p.key, m);
+
+    for (const p of topPlaces) {
+      let layer = null;
+      if (useCanvas) {
+        layer = L.circleMarker([p.lat, p.lng], {
+          radius: 4,
+          color: "#9bbcff",
+          fillColor: "#9bbcff",
+          fillOpacity: 0.7,
+          weight: 1,
+          renderer
+        });
+      } else {
+        layer = L.marker([p.lat, p.lng], { icon: defaultIcon });
+        const label = `<b>${escapeHtml(p.name || p.key)}</b><br/>Visits: ${p.visits}<br/>Time: ${fmtDuration(p.seconds)}<br/>${p.city ? escapeHtml(p.city) : ""}${p.country ? ", " + escapeHtml(p.country) : ""}`;
+        layer.bindPopup(label);
+      }
+      layer.addTo(markersLayer);
+      markers.set(p.key, { layer, data: p });
       bounds.push([p.lat, p.lng]);
     }
     if (bounds.length) map.fitBounds(bounds, { padding: [30, 30] });
   }
 
   function render() {
-    if (!visits.length || !agg) return;
+    if (!agg) return;
 
     const meta = {
-      type: visits[0]?.kind === "placeVisit" ? "Semantic Location History" : "Records.json (approx stays)",
-      count: visits.length,
+      type: dataType === "semantic_takeout" || dataType === "device_export_array" || dataType === "device_export_object"
+        ? "Semantic Location History"
+        : (dataType === "records_takeout" ? "Records.json (approx stays)" : "Unknown"),
+      count: visitsCount,
       places: agg.places.length,
       cities: agg.cities.length,
       countries: agg.countries.length,
@@ -619,93 +705,92 @@ function extractDeviceExportVisits(json) {
     if (currentTab === "countries") renderTable(agg.countries, "countries");
     if (currentTab === "cities") renderTable(agg.cities, "cities");
     if (currentTab === "places") renderTable(agg.places, "places");
-    if (currentTab === "visits") renderTable(visits, "visits");
+    if (currentTab === "visits") renderTable(visits, "visits", visitsCount);
 
-    renderMarkers(agg.places);
   }
 
   // ---------- Load flow ----------
-  async function loadDefaultFile() {
-    $tableWrap.innerHTML = `<div class="muted">Loading location-history.json...</div>`;
+  function startWorkerLoad(source) {
+    if (activeWorker) {
+      activeWorker.terminate();
+      activeWorker = null;
+    }
+    const wantsGeocode = $enableGeocode.checked;
+    const geoCacheObj = {};
+    for (const [k, v] of geoCache.entries()) geoCacheObj[k] = v;
+
+    $tableWrap.innerHTML = `<div class="muted">Loading data...</div>`;
     const worker = new Worker('./worker.js');
-    worker.onmessage = function(e) {
-      if (e.data.type === 'progress') {
+    activeWorker = worker;
+
+    worker.onmessage = function (e) {
+      if (e.data.type === "progress") {
         $tableWrap.innerHTML = `<div class="muted">${e.data.message}</div>`;
-      } else if (e.data.type === 'done') {
-        processJson(e.data.data);
-        worker.terminate();
-      } else if (e.data.type === 'error') {
+        return;
+      }
+      if (e.data.type === "error") {
         $tableWrap.innerHTML = `<div class="warn">Error: ${escapeHtml(e.data.error)}</div>`;
         worker.terminate();
+        activeWorker = null;
+        return;
       }
+      if (e.data.type !== "done") return;
+
+      const payload = e.data.data || {};
+      dataType = payload.dataType || "Unknown";
+      visitsCount = payload.visitsCount || 0;
+
+      if (wantsGeocode) {
+        visits = Array.isArray(payload.visits) ? payload.visits : [];
+        $tableWrap.innerHTML = `<div class="muted">Enriching data...</div>`;
+        enrichGeo(visits).then(() => {
+          $tableWrap.innerHTML = `<div class="muted">Aggregating...</div>`;
+          agg = aggregate(visits);
+          visits = visits.slice(0, VISITS_PREVIEW_LIMIT);
+          renderMarkers(agg.places);
+          render();
+        }).finally(() => {
+          worker.terminate();
+          activeWorker = null;
+        });
+        return;
+      }
+
+      visits = Array.isArray(payload.visitsPreview) ? payload.visitsPreview : [];
+      agg = payload.agg || null;
+      if (!agg) {
+        $tableWrap.innerHTML = `<div class="warn">No aggregated data returned.</div>`;
+      } else {
+        renderMarkers(agg.places);
+        render();
+      }
+      worker.terminate();
+      activeWorker = null;
     };
-    worker.postMessage('./location-history.json');
+
+    worker.postMessage({
+      type: "load",
+      source,
+      options: {
+        includeVisits: wantsGeocode,
+        previewLimit: VISITS_PREVIEW_LIMIT,
+        geoCache: geoCacheObj
+      }
+    });
   }
 
-  function processJson(json) {
-    $tableWrap.innerHTML = `<div class="muted">Processing visits...</div>`;
-    const allJson = [json];
-    const type = detectType(allJson[0]);
-    if (type === "unknown") {
-      $tableWrap.innerHTML = `<div class="warn">Couldn\'t detect format in location-history.json.</div>`;
-      return;
-    }
-    if (type === "device_export_array") {
-      visits = extractDeviceExportVisits(json);
-    } else {
-      visits = extractSemantic(allJson);
-    }
-    $tableWrap.innerHTML = `<div class="muted">Enriching data...</div>`;
-    enrichGeo(visits).then(() => {
-      $tableWrap.innerHTML = `<div class="muted">Aggregating...</div>`;
-      agg = aggregate(visits);
-      render();
-    });
+  function loadDefaultFile() {
+    startWorkerLoad({ url: "./location-history.json" });
   }
 
   // Load default file on page load
   loadDefaultFile();
 
-  $fileInput.addEventListener("change", async (e) => {
+  $fileInput.addEventListener("change", (e) => {
     const files = Array.from(e.target.files || []);
     if (!files.length) return;
-
     resetAll();
-    $tableWrap.innerHTML = `<div class="muted">Loading ${files.length} file(s)…</div>`;
-
-    try {
-      const allJson = [];
-      for (const f of files) {
-        const txt = await f.text();
-        allJson.push(JSON.parse(txt));
-      }
-
-      const type = detectType(allJson[0]);
-if (type === "unknown") {
-  $tableWrap.innerHTML = `<div class="warn">Couldn’t detect format. Expected either Takeout (timelineObjects/locations) or on-device export (semanticSegments or top-level array).</div>`;
-  return;
-}
-
-if (type === "semantic_takeout") {
-  visits = extractSemantic(allJson);               // existing
-} else if (type === "records_takeout") {
-  visits = extractRecordsAsStays(allJson);         // existing
-} else if (type === "device_export_array") {
-  // your file: each JSON is an array; merge them
-  visits = allJson.flatMap(j => extractDeviceExportVisits(j));
-} else if (type === "device_export_object") {
-  visits = allJson.flatMap(j => extractDeviceExportVisits(j));
-}
-
-// Optional geocode enrichment (unchanged)
-await enrichGeo(visits);
-
-agg = aggregate(visits);
-render();
-    } catch (err) {
-      console.error(err);
-      $tableWrap.innerHTML = `<div class="warn">Error parsing JSON: ${escapeHtml(err?.message || String(err))}</div>`;
-    }
+    startWorkerLoad({ files });
   });
 </script>
 </body>
